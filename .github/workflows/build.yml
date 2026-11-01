@@ -1,27 +1,32 @@
+
 name: Build Claude Manager by Zdzisi0
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Pobierz repozytorium
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Ustaw Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
+      - name: Przygotuj Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Generate Android project
+      - name: Utwórz projekt Android
         shell: bash
         run: |
           mkdir -p app/src/main/java/pl/zdzisi0/claudmanager
@@ -41,7 +46,7 @@ jobs:
                   mavenCentral()
               }
           }
-          rootProject.name = "ClaudeManagerByZdzisi0"
+          rootProject.name = "ClaudeManager"
           include(":app")
           EOF
 
@@ -49,11 +54,6 @@ jobs:
           plugins {
               id 'com.android.application' version '8.7.3' apply false
           }
-          EOF
-
-          cat > gradle.properties <<'EOF'
-          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-          android.useAndroidX=true
           EOF
 
           cat > app/build.gradle <<'EOF'
@@ -69,19 +69,27 @@ jobs:
                   applicationId 'pl.zdzisi0.claudmanager'
                   minSdk 26
                   targetSdk 35
-                  versionCode 1
-                  versionName '1.0'
+                  versionCode 2
+                  versionName '2.0'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
               }
           }
           EOF
 
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <queries>
+                  <package android:name="com.anthropic.claude" />
+              </queries>
               <application
-                  android:theme="@android:style/Theme.Material.NoActionBar"
-                  android:label="Claude Manager by Zdzisi0"
                   android:allowBackup="false"
-                  android:supportsRtl="true">
+                  android:label="Claude Manager"
+                  android:theme="@android:style/Theme.Material.NoActionBar"
+                  android:usesCleartextTraffic="false">
                   <activity
                       android:name=".MainActivity"
                       android:exported="true">
@@ -97,163 +105,665 @@ jobs:
           cat > app/src/main/java/pl/zdzisi0/claudmanager/MainActivity.java <<'EOF'
           package pl.zdzisi0.claudmanager;
 
-          import android.app.Activity;
-          import android.app.AlertDialog;
-          import android.content.ClipData;
-          import android.content.ClipboardManager;
-          import android.content.Context;
-          import android.content.SharedPreferences;
+          import android.app.*;
+          import android.os.*;
+          import android.content.*;
           import android.graphics.Color;
           import android.graphics.Typeface;
           import android.graphics.drawable.GradientDrawable;
-          import android.os.Bundle;
-          import android.view.Gravity;
-          import android.view.View;
-          import android.widget.Button;
-          import android.widget.EditText;
-          import android.widget.LinearLayout;
-          import android.widget.ScrollView;
-          import android.widget.TextView;
-          import android.widget.Toast;
-          import org.json.JSONArray;
-          import org.json.JSONObject;
-          import java.util.ArrayList;
+          import android.view.*;
+          import android.view.inputmethod.InputMethodManager;
+          import android.widget.*;
+          import android.text.InputType;
+          import android.security.keystore.*;
+          import javax.crypto.*;
+          import javax.crypto.spec.*;
+          import java.io.*;
+          import java.security.*;
+          import java.security.spec.*;
+          import java.util.*;
+          import org.json.*;
 
           public class MainActivity extends Activity {
-              private final int BG = Color.rgb(13,18,32), PANEL = Color.rgb(25,33,53);
-              private final int ACCENT = Color.rgb(117,143,255), MUTED = Color.rgb(166,178,202);
-              private SharedPreferences prefs;
-              private ArrayList<Account> accounts = new ArrayList<>();
+
+              private final String KEY_ALIAS = "ClaudeManagerDataKey";
+              private final String PREFS = "security_settings";
+              private final String DATA_FILE = "secure_data.bin";
+              private final String CLAUDE_PACKAGE = "com.anthropic.claude";
+
+              private android.content.SharedPreferences securityPrefs;
+              private JSONObject data;
+              private LinearLayout root;
               private LinearLayout accountList;
-              private EditText taskEdit;
-              private int activeIndex = 0;
+              private EditText contextInput;
+              private boolean unlocked = false;
 
-              static class Account {
-                  String name; boolean available;
-                  Account(String n, boolean a) { name=n; available=a; }
+              private int bg = Color.rgb(17, 20, 29);
+              private int panel = Color.rgb(29, 34, 46);
+              private int accent = Color.rgb(190, 160, 255);
+              private int white = Color.rgb(239, 241, 247);
+              private int muted = Color.rgb(160, 169, 185);
+
+              @Override
+              public void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  getWindow().setFlags(
+                      android.view.WindowManager.LayoutParams.FLAG_SECURE,
+                      android.view.WindowManager.LayoutParams.FLAG_SECURE
+                  );
+                  getWindow().setStatusBarColor(bg);
+                  getWindow().setNavigationBarColor(bg);
+
+                  securityPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+
+                  if (securityPrefs.contains("pin_hash")) {
+                      askPin(false);
+                  } else {
+                      askPin(true);
+                  }
               }
 
-              @Override public void onCreate(Bundle b) {
-                  super.onCreate(b);
-                  prefs=getSharedPreferences("manager",MODE_PRIVATE);
-                  load(); buildUi();
+              private int dp(float value) {
+                  return (int)(value * getResources().getDisplayMetrics().density + 0.5f);
               }
 
-              private void buildUi() {
-                  ScrollView scroll=new ScrollView(this);
-                  LinearLayout root=new LinearLayout(this);
-                  root.setOrientation(1); root.setPadding(dp(20),dp(26),dp(20),dp(28));
-                  root.setBackgroundColor(BG); scroll.addView(root);
+              private GradientDrawable shape(int color, int radius) {
+                  GradientDrawable d = new GradientDrawable();
+                  d.setColor(color);
+                  d.setCornerRadius(dp(radius));
+                  return d;
+              }
 
-                  TextView brand=text("CLAUDE MANAGER",12,ACCENT,true);
-                  brand.setLetterSpacing(.12f); root.addView(brand);
-                  root.addView(text("by Zdzisi0",29,Color.WHITE,true));
-                  root.addView(text("Prosty organizer kont i kontekstu pracy",14,MUTED,false));
-                  gap(root,18);
-                  LinearLayout note=panel();
-                  note.addView(text("Wersja 1.0: aplikacja nie odczytuje limitów ani nie przełącza kont w Claude automatycznie. Pozwala ręcznie zarządzać listą kont i przenosić kontekst rozmowy.",13,MUTED,false));
-                  root.addView(note); gap(root,22);
-                  root.addView(section("TWOJE KONTA"));
-                  accountList=new LinearLayout(this); accountList.setOrientation(1); root.addView(accountList);
-                  Button add=button("+  Dodaj konto"); add.setOnClickListener(v->addAccount()); root.addView(add);
-                  gap(root,24); root.addView(section("KONTEKST ZADANIA"));
-                  TextView hint=text("Opisz, nad czym pracujesz. Instrukcję kontynuacji skopiujesz do nowego czatu.",13,MUTED,false);
-                  hint.setPadding(0,dp(6),0,dp(10)); root.addView(hint);
-                  taskEdit=new EditText(this); taskEdit.setTextColor(Color.WHITE); taskEdit.setHintTextColor(MUTED);
-                  taskEdit.setHint("Opisz zadanie, ustalenia i następny krok...");
-                  taskEdit.setTextSize(15); taskEdit.setGravity(Gravity.TOP|Gravity.START);
-                  taskEdit.setMinLines(5); taskEdit.setPadding(dp(14),dp(12),dp(14),dp(12));
-                  taskEdit.setBackground(round(PANEL,14)); taskEdit.setText(prefs.getString("task",""));
-                  root.addView(taskEdit,new LinearLayout.LayoutParams(-1,dp(150)));
-                  Button save=button("Zapisz kontekst");
-                  save.setOnClickListener(v->{prefs.edit().putString("task",taskEdit.getText().toString()).apply(); toast("Kontekst zapisany.");});
-                  root.addView(save);
-                  Button copy=button("Kopiuj instrukcję kontynuacji");
-                  copy.setBackground(round(Color.rgb(57,75,145),14)); copy.setOnClickListener(v->copyHandoff()); root.addView(copy);
-                  gap(root,20);
-                  TextView footer=text("Wersja 1.0 • Dane lokalnie na telefonie",11,MUTED,false);
-                  footer.setGravity(Gravity.CENTER); root.addView(footer);
-                  setContentView(scroll); renderAccounts();
+              private TextView text(String value, int size, int color, boolean bold) {
+                  TextView t = new TextView(this);
+                  t.setText(value);
+                  t.setTextSize(size);
+                  t.setTextColor(color);
+                  if (bold) t.setTypeface(null, Typeface.BOLD);
+                  return t;
+              }
+
+              private Button button(String label, Runnable action) {
+                  Button b = new Button(this);
+                  b.setText(label);
+                  b.setTextColor(white);
+                  b.setAllCaps(false);
+                  b.setBackground(shape(Color.rgb(54, 62, 82), 12));
+                  b.setOnClickListener(v -> action.run());
+                  return b;
+              }
+
+              private void askPin(boolean create) {
+                  EditText field = new EditText(this);
+                  field.setSingleLine(true);
+                  field.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+                  field.setHint("Minimum 6 cyfr");
+                  field.setTextColor(white);
+                  field.setHintTextColor(muted);
+
+                  LinearLayout box = new LinearLayout(this);
+                  box.setPadding(dp(22), dp(8), dp(22), dp(8));
+                  box.addView(field);
+
+                  AlertDialog dialog = new AlertDialog.Builder(this)
+                      .setTitle(create ? "Utwórz kod PIN" : "Claude Manager")
+                      .setMessage(create
+                          ? "Ustaw PIN chroniący dostęp do aplikacji."
+                          : "Wpisz PIN, aby odblokować aplikację.")
+                      .setView(box)
+                      .setCancelable(false)
+                      .setPositiveButton(create ? "Dalej" : "Odblokuj", null)
+                      .create();
+
+                  dialog.setOnShowListener(v -> {
+                      dialog.getButton(-1).setOnClickListener(btn -> {
+                          String pin = field.getText().toString();
+                          if (pin.length() < 6) {
+                              field.setError("PIN musi mieć minimum 6 cyfr");
+                              return;
+                          }
+                          dialog.dismiss();
+                          if (create) confirmPin(pin);
+                          else verifyPin(pin);
+                      });
+                  });
+                  dialog.show();
+                  dialog.getWindow().setSoftInputMode(
+                      WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+                  );
+              }
+
+              private void confirmPin(String first) {
+                  EditText field = new EditText(this);
+                  field.setSingleLine(true);
+                  field.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+                  field.setHint("Powtórz PIN");
+                  field.setTextColor(white);
+
+                  new AlertDialog.Builder(this)
+                      .setTitle("Potwierdź PIN")
+                      .setView(field)
+                      .setCancelable(false)
+                      .setPositiveButton("Zapisz", (d, w) -> {
+                          String second = field.getText().toString();
+                          if (!first.equals(second)) {
+                              toast("Kody PIN są różne.");
+                              confirmPin(first);
+                              return;
+                          }
+                          try {
+                              byte[] salt = new byte[16];
+                              new SecureRandom().nextBytes(salt);
+                              String hash = pinHash(first, salt);
+                              securityPrefs.edit()
+                                  .putString("pin_salt", Base64.getEncoder().encodeToString(salt))
+                                  .putString("pin_hash", hash)
+                                  .apply();
+                              unlock();
+                          } catch (Exception e) {
+                              toast("Nie udało się skonfigurować zabezpieczenia.");
+                          }
+                      })
+                      .setNegativeButton("Anuluj", (d, w) -> finish())
+                      .show();
+              }
+
+              private String pinHash(String pin, byte[] salt) throws Exception {
+                  PBEKeySpec spec = new PBEKeySpec(pin.toCharArray(), salt, 150000, 256);
+                  SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
+                  byte[] result = factory.generateSecret(spec).getEncoded();
+                  spec.clearPassword();
+                  return Base64.getEncoder().encodeToString(result);
+              }
+
+              private void verifyPin(String pin) {
+                  try {
+                      byte[] salt = Base64.getDecoder().decode(
+                          securityPrefs.getString("pin_salt", "")
+                      );
+                      String entered = pinHash(pin, salt);
+                      String saved = securityPrefs.getString("pin_hash", "");
+                      if (MessageDigest.isEqual(
+                          entered.getBytes("UTF-8"), saved.getBytes("UTF-8")
+                      )) {
+                          unlock();
+                      } else {
+                          toast("Nieprawidłowy PIN.");
+                          askPin(false);
+                      }
+                  } catch (Exception e) {
+                      toast("Nie można zweryfikować PIN-u.");
+                      finish();
+                  }
+              }
+
+              private SecretKey getEncryptionKey() throws Exception {
+                  KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+                  ks.load(null);
+
+                  if (ks.containsAlias(KEY_ALIAS)) {
+                      return (SecretKey) ks.getKey(KEY_ALIAS, null);
+                  }
+
+                  KeyGenerator generator = KeyGenerator.getInstance(
+                      KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore"
+                  );
+
+                  KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder(
+                      KEY_ALIAS,
+                      KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT
+                  )
+                      .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                      .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                      .setKeySize(256)
+                      .setRandomizedEncryptionRequired(true)
+                      .build();
+
+                  generator.init(spec);
+                  return generator.generateKey();
+              }
+
+              private void saveEncryptedData() throws Exception {
+                  SecretKey key = getEncryptionKey();
+                  Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                  cipher.init(Cipher.ENCRYPT_MODE, key);
+
+                  byte[] encrypted = cipher.doFinal(data.toString().getBytes("UTF-8"));
+                  byte[] iv = cipher.getIV();
+
+                  File file = new File(getFilesDir(), DATA_FILE);
+                  FileOutputStream out = new FileOutputStream(file);
+                  out.write(iv.length);
+                  out.write(iv);
+                  out.write(encrypted);
+                  out.flush();
+                  out.close();
+              }
+
+              private JSONObject loadEncryptedData() throws Exception {
+                  File file = new File(getFilesDir(), DATA_FILE);
+                  if (!file.exists()) return new JSONObject();
+
+                  FileInputStream in = new FileInputStream(file);
+                  int ivLength = in.read();
+                  if (ivLength < 12 || ivLength > 16) {
+                      in.close();
+                      throw new Exception("Nieprawidłowy plik danych.");
+                  }
+
+                  byte[] iv = new byte[ivLength];
+                  int read = in.read(iv);
+                  if (read != ivLength) {
+                      in.close();
+                      throw new Exception("Uszkodzony plik danych.");
+                  }
+
+                  ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                  byte[] temp = new byte[4096];
+                  int n;
+                  while ((n = in.read(temp)) != -1) buffer.write(temp, 0, n);
+                  in.close();
+
+                  Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                  cipher.init(
+                      Cipher.DECRYPT_MODE,
+                      getEncryptionKey(),
+                      new GCMParameterSpec(128, iv)
+                  );
+
+                  byte[] plain = cipher.doFinal(buffer.toByteArray());
+                  return new JSONObject(new String(plain, "UTF-8"));
+              }
+
+              private void unlock() {
+                  try {
+                      data = loadEncryptedData();
+                      if (!data.has("accounts")) data.put("accounts", new JSONArray());
+                      if (!data.has("context")) data.put("context", "");
+                      if (!data.has("selected")) data.put("selected", "");
+                      unlocked = true;
+                      showMain();
+                  } catch (Exception e) {
+                      toast("Nie udało się odszyfrować danych. Dane nie zostały nadpisane.");
+                      finish();
+                  }
+              }
+
+              private void save() {
+                  try {
+                      saveEncryptedData();
+                  } catch (Exception e) {
+                      toast("Błąd bezpiecznego zapisu danych.");
+                  }
+              }
+
+              private void toast(String message) {
+                  Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+              }
+
+              private void showMain() {
+                  root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(bg);
+
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setFillViewport(true);
+
+                  LinearLayout content = new LinearLayout(this);
+                  content.setOrientation(LinearLayout.VERTICAL);
+                  content.setPadding(dp(20), dp(24), dp(20), dp(30));
+
+                  TextView title = text("CLAUDE MANAGER", 24, white, true);
+                  content.addView(title);
+
+                  TextView subtitle = text("Zarządzanie kontami i ciągłość pracy", 14, muted, false);
+                  LinearLayout.LayoutParams subParams = new LinearLayout.LayoutParams(-1, -2);
+                  subParams.bottomMargin = dp(22);
+                  content.addView(subtitle, subParams);
+
+                  section(content, "TWOJE KONTA");
+
+                  accountList = new LinearLayout(this);
+                  accountList.setOrientation(LinearLayout.VERTICAL);
+                  content.addView(accountList);
+                  renderAccounts();
+
+                  content.addView(button("＋ Dodaj konto", this::addAccount), margin());
+
+                  section(content, "PRACA I KONTYNUACJA");
+
+                  TextView info = text(
+                      "Zapisz krótki opis zadania. Przy zmianie konta przygotujesz go do skopiowania.",
+                      13, muted, false
+                  );
+                  content.addView(info, margin());
+
+                  contextInput = new EditText(this);
+                  contextInput.setTextColor(white);
+                  contextInput.setHintTextColor(muted);
+                  contextInput.setHint("Wklej opis zadania lub kontekst do kontynuacji...");
+                  contextInput.setGravity(Gravity.TOP | Gravity.START);
+                  contextInput.setMinLines(4);
+                  contextInput.setPadding(dp(14), dp(12), dp(14), dp(12));
+                  contextInput.setBackground(shape(panel, 12));
+                  contextInput.setText(data.optString("context", ""));
+                  content.addView(contextInput, margin());
+
+                  content.addView(button("Zapisz kontekst", () -> {
+                      data.put("context", contextInput.getText().toString());
+                      save();
+                      toast("Kontekst zapisany lokalnie.");
+                  }), margin());
+
+                  content.addView(button("Kopiuj tekst kontynuacji", this::copyHandoff), margin());
+
+                  section(content, "CLAUDE");
+
+                  content.addView(button("Otwórz oficjalną aplikację Claude", this::openClaude), margin());
+
+                  TextView security = text(
+                      "Ochrona: PIN, szyfrowanie AES-256-GCM przez Android Keystore, " +
+                      "dane przechowywane lokalnie, bez wysyłania ich na serwer. " +
+                      "Zrzuty ekranu są zablokowane.",
+                      12, muted, false
+                  );
+                  LinearLayout.LayoutParams secParams = margin();
+                  secParams.topMargin = dp(22);
+                  content.addView(security, secParams);
+
+                  content.addView(button("Zmień PIN", this::changePin), margin());
+                  content.addView(button("Usuń wszystkie dane aplikacji", this::clearAll), margin());
+
+                  scroll.addView(content);
+                  root.addView(scroll);
+                  setContentView(root);
+              }
+
+              private LinearLayout.LayoutParams margin() {
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
+                  p.topMargin = dp(9);
+                  return p;
+              }
+
+              private void section(LinearLayout parent, String label) {
+                  TextView t = text(label, 14, accent, true);
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
+                  p.topMargin = dp(20);
+                  p.bottomMargin = dp(10);
+                  parent.addView(t, p);
               }
 
               private void renderAccounts() {
                   accountList.removeAllViews();
-                  if(accounts.isEmpty()) {
-                      LinearLayout empty=panel(); empty.addView(text("Nie dodano jeszcze żadnego konta.",14,MUTED,false)); accountList.addView(empty); return;
+                  JSONArray accounts = data.optJSONArray("accounts");
+                  if (accounts == null || accounts.length() == 0) {
+                      TextView empty = text("Nie dodano jeszcze żadnego konta.", 14, muted, false);
+                      accountList.addView(empty, margin());
+                      return;
                   }
-                  for(int i=0;i<accounts.size();i++) {
-                      final int ix=i; Account a=accounts.get(i); LinearLayout card=panel();
-                      LinearLayout row=new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL);
-                      LinearLayout details=new LinearLayout(this); details.setOrientation(1);
-                      details.addView(text(a.name+(i==activeIndex?"  ✓":""),16,Color.WHITE,true));
-                      details.addView(text(a.available?"Status: oznaczone jako dostępne":"Status: limit oznaczony jako wykorzystany",12,a.available?ACCENT:Color.rgb(255,177,117),false));
-                      row.addView(details,new LinearLayout.LayoutParams(0,-2,1));
-                      Button select=small(i==activeIndex?"Aktywne":"Wybierz");
-                      select.setOnClickListener(v->{activeIndex=ix;save();renderAccounts();}); row.addView(select); card.addView(row);
-                      LinearLayout actions=new LinearLayout(this);
-                      Button status=small(a.available?"Oznacz limit":"Oznacz dostępne");
-                      status.setOnClickListener(v->{a.available=!a.available;save();renderAccounts();});
-                      Button remove=small("Usuń");
-                      remove.setOnClickListener(v->new AlertDialog.Builder(this).setMessage("Usunąć konto „"+a.name+"”?")
-                          .setNegativeButton("Anuluj",null).setPositiveButton("Usuń",(d,w)->{
-                              accounts.remove(ix); if(accounts.isEmpty())activeIndex=0; else if(activeIndex>=accounts.size())activeIndex=accounts.size()-1;
-                              save();renderAccounts();
-                          }).show());
-                      actions.addView(status,new LinearLayout.LayoutParams(0,dp(42),1));
-                      actions.addView(remove,new LinearLayout.LayoutParams(0,dp(42),1)); card.addView(actions);
-                      accountList.addView(card); gap(accountList,8);
+
+                  String selected = data.optString("selected", "");
+
+                  for (int i = 0; i < accounts.length(); i++) {
+                      JSONObject account = accounts.optJSONObject(i);
+                      if (account == null) continue;
+
+                      String id = account.optString("id", "");
+                      String name = account.optString("name", "Konto");
+                      String status = account.optString("status", "Nieznany");
+                      String checked = account.optString("checked", "");
+
+                      LinearLayout card = new LinearLayout(this);
+                      card.setOrientation(LinearLayout.VERTICAL);
+                      card.setPadding(dp(14), dp(12), dp(14), dp(12));
+                      card.setBackground(shape(panel, 14));
+
+                      LinearLayout.LayoutParams cardParams = margin();
+                      accountList.addView(card, cardParams);
+
+                      String active = id.equals(selected) ? "  •  AKTYWNE" : "";
+                      card.addView(text(name + active, 16, white, true));
+
+                      card.addView(text("Status: " + status, 13, muted, false), margin());
+
+                      if (!checked.isEmpty()) {
+                          card.addView(text("Ostatnie sprawdzenie: " + checked, 11, muted, false));
+                      }
+
+                      LinearLayout actions = new LinearLayout(this);
+                      actions.setOrientation(LinearLayout.HORIZONTAL);
+
+                      Button select = button("Wybierz", () -> {
+                          data.put("selected", id);
+                          save();
+                          renderAccounts();
+                      });
+                      actions.addView(select, new LinearLayout.LayoutParams(0, -2, 1));
+
+                      Button change = button("Status", () -> changeStatus(id));
+                      LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, -2, 1);
+                      cp.leftMargin = dp(5);
+                      actions.addView(change, cp);
+
+                      Button remove = button("Usuń", () -> removeAccount(id));
+                      LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(0, -2, 1);
+                      rp.leftMargin = dp(5);
+                      actions.addView(remove, rp);
+
+                      card.addView(actions, margin());
                   }
               }
 
               private void addAccount() {
-                  EditText input=new EditText(this); input.setSingleLine(true); input.setHint("Np. Konto prywatne");
-                  new AlertDialog.Builder(this).setTitle("Dodaj konto Claude")
-                      .setMessage("Podaj nazwę konta. Nie wpisuj hasła, kodu logowania ani tokenu.")
-                      .setView(input).setNegativeButton("Anuluj",null).setPositiveButton("Dodaj",(d,w)->{
-                          String n=input.getText().toString().trim(); if(n.isEmpty())n="Konto "+(accounts.size()+1);
-                          accounts.add(new Account(n,true)); save();renderAccounts();
-                      }).show();
+                  EditText input = new EditText(this);
+                  input.setHint("Np. Claude prywatne");
+                  input.setTextColor(white);
+                  input.setHintTextColor(muted);
+
+                  new AlertDialog.Builder(this)
+                      .setTitle("Dodaj konto")
+                      .setMessage("Podaj nazwę ułatwiającą rozpoznanie konta. Nie wpisuj hasła.")
+                      .setView(input)
+                      .setPositiveButton("Dodaj", (d, w) -> {
+                          String name = input.getText().toString().trim();
+                          if (name.isEmpty()) {
+                              toast("Podaj nazwę konta.");
+                              return;
+                          }
+                          try {
+                              JSONObject account = new JSONObject();
+                              account.put("id", UUID.randomUUID().toString());
+                              account.put("name", name);
+                              account.put("status", "Nieznany");
+                              account.put("checked", "");
+                              data.getJSONArray("accounts").put(account);
+                              if (data.optString("selected", "").isEmpty()) {
+                                  data.put("selected", account.getString("id"));
+                              }
+                              save();
+                              renderAccounts();
+                          } catch (Exception e) {
+                              toast("Nie udało się dodać konta.");
+                          }
+                      })
+                      .setNegativeButton("Anuluj", null)
+                      .show();
+              }
+
+              private JSONObject findAccount(String id) {
+                  JSONArray accounts = data.optJSONArray("accounts");
+                  if (accounts == null) return null;
+                  for (int i = 0; i < accounts.length(); i++) {
+                      JSONObject a = accounts.optJSONObject(i);
+                      if (a != null && id.equals(a.optString("id"))) return a;
+                  }
+                  return null;
+              }
+
+              private void changeStatus(String id) {
+                  String[] options = {
+                      "Nieznany",
+                      "Dostępne",
+                      "Limit osiągnięty"
+                  };
+
+                  new AlertDialog.Builder(this)
+                      .setTitle("Ustaw status konta")
+                      .setItems(options, (d, which) -> {
+                          JSONObject a = findAccount(id);
+                          if (a == null) return;
+                          try {
+                              a.put("status", options[which]);
+                              a.put("checked", new java.text.SimpleDateFormat(
+                                  "yyyy-MM-dd HH:mm", Locale.getDefault()
+                              ).format(new Date()));
+                              save();
+                              renderAccounts();
+                          } catch (Exception e) {
+                              toast("Nie udało się zapisać statusu.");
+                          }
+                      })
+                      .show();
+              }
+
+              private void removeAccount(String id) {
+                  new AlertDialog.Builder(this)
+                      .setTitle("Usunąć konto?")
+                      .setMessage("Usunięta zostanie tylko jego nazwa i zapisany status w Claude Manager.")
+                      .setNegativeButton("Anuluj", null)
+                      .setPositiveButton("Usuń", (d, w) -> {
+                          JSONArray old = data.optJSONArray("accounts");
+                          JSONArray updated = new JSONArray();
+                          if (old != null) {
+                              for (int i = 0; i < old.length(); i++) {
+                                  JSONObject a = old.optJSONObject(i);
+                                  if (a != null && !id.equals(a.optString("id"))) updated.put(a);
+                              }
+                          }
+                          data.put("accounts", updated);
+                          if (id.equals(data.optString("selected", ""))) {
+                              data.put("selected", updated.length() > 0
+                                  ? updated.optJSONObject(0).optString("id", "") : "");
+                          }
+                          save();
+                          renderAccounts();
+                      })
+                      .show();
               }
 
               private void copyHandoff() {
-                  String task=taskEdit.getText().toString().trim(); prefs.edit().putString("task",task).apply();
-                  String prompt="Kontynuujemy pracę rozpoczętą w innej rozmowie. Przeczytaj kontekst, krótko potwierdź, co rozumiesz, a następnie kontynuuj od wskazanego kroku. Jeśli brakuje ważnych informacji, zadaj jedno konkretne pytanie.\\n\\nKONTEKST:\\n"+(task.isEmpty()?"[Uzupełnij kontekst zadania.]":task);
-                  ClipboardManager cm=(ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
-                  cm.setPrimaryClip(ClipData.newPlainText("Kontynuacja Claude",prompt));
-                  toast("Skopiowano. Wklej instrukcję w nowym czacie Claude.");
+                  String selectedName = "Nie wybrano konta";
+                  JSONObject selected = findAccount(data.optString("selected", ""));
+                  if (selected != null) selectedName = selected.optString("name", "Konto");
+
+                  String context = contextInput.getText().toString().trim();
+                  if (context.isEmpty()) {
+                      toast("Najpierw wpisz lub zapisz kontekst zadania.");
+                      return;
+                  }
+
+                  String prompt =
+                      "Kontynuuję pracę na innym koncie Claude.\n" +
+                      "Poprzednie konto: " + selectedName + "\n\n" +
+                      "KONTEKST ZADANIA:\n" + context + "\n\n" +
+                      "Przeczytaj kontekst i kontynuuj zadanie. " +
+                      "Jeśli brakuje ważnych informacji, zapytaj mnie.";
+
+                  ClipboardManager clipboard =
+                      (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+                  clipboard.setPrimaryClip(ClipData.newPlainText("Kontekst Claude", prompt));
+                  toast("Tekst kontynuacji skopiowany. Wklej go w Claude.");
               }
 
-              private void load() {
+              private void openClaude() {
                   try {
-                      JSONArray a=new JSONArray(prefs.getString("accounts","[]"));
-                      for(int i=0;i<a.length();i++){JSONObject o=a.getJSONObject(i);accounts.add(new Account(o.optString("name","Konto"),o.optBoolean("available",true)));}
-                      activeIndex=prefs.getInt("active",0); if(activeIndex>=accounts.size())activeIndex=0;
-                  } catch(Exception e){accounts.clear();}
+                      Intent intent = getPackageManager().getLaunchIntentForPackage(CLAUDE_PACKAGE);
+                      if (intent != null) {
+                          startActivity(intent);
+                      } else {
+                          Intent store = new Intent(
+                              Intent.ACTION_VIEW,
+                              android.net.Uri.parse("https://play.google.com/store/apps/details?id=" + CLAUDE_PACKAGE)
+                          );
+                          startActivity(store);
+                      }
+                  } catch (Exception e) {
+                      toast("Nie udało się otworzyć Claude.");
+                  }
               }
-              private void save() {
-                  JSONArray a=new JSONArray();
-                  try { for(Account x:accounts){JSONObject o=new JSONObject();o.put("name",x.name);o.put("available",x.available);a.put(o);}
-                      prefs.edit().putString("accounts",a.toString()).putInt("active",activeIndex).apply();
-                  } catch(Exception ignored){}
+
+              private void changePin() {
+                  EditText oldPin = new EditText(this);
+                  oldPin.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+                  oldPin.setHint("Obecny PIN");
+                  oldPin.setTextColor(white);
+
+                  new AlertDialog.Builder(this)
+                      .setTitle("Zmiana PIN-u")
+                      .setView(oldPin)
+                      .setPositiveButton("Dalej", (d, w) -> {
+                          try {
+                              byte[] salt = Base64.getDecoder().decode(
+                                  securityPrefs.getString("pin_salt", "")
+                              );
+                              String entered = pinHash(oldPin.getText().toString(), salt);
+                              String saved = securityPrefs.getString("pin_hash", "");
+                              if (!MessageDigest.isEqual(
+                                  entered.getBytes("UTF-8"), saved.getBytes("UTF-8")
+                              )) {
+                                  toast("Nieprawidłowy obecny PIN.");
+                                  return;
+                              }
+                              askPin(true);
+                          } catch (Exception e) {
+                              toast("Nie udało się zmienić PIN-u.");
+                          }
+                      })
+                      .setNegativeButton("Anuluj", null)
+                      .show();
               }
-              private LinearLayout panel(){LinearLayout l=new LinearLayout(this);l.setOrientation(1);l.setPadding(dp(14),dp(13),dp(14),dp(13));l.setBackground(round(PANEL,16));return l;}
-              private TextView section(String s){TextView t=text(s,12,ACCENT,true);t.setLetterSpacing(.1f);return t;}
-              private TextView text(String s,int size,int color,boolean bold){TextView t=new TextView(this);t.setText(s);t.setTextSize(size);t.setTextColor(color);if(bold)t.setTypeface(Typeface.DEFAULT,Typeface.BOLD);return t;}
-              private Button button(String s){Button b=new Button(this);b.setText(s);b.setTextColor(Color.WHITE);b.setAllCaps(false);b.setTextSize(14);b.setBackground(round(ACCENT,14));LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,dp(48));p.topMargin=dp(9);b.setLayoutParams(p);return b;}
-              private Button small(String s){Button b=new Button(this);b.setText(s);b.setTextColor(Color.WHITE);b.setAllCaps(false);b.setTextSize(11);b.setMinHeight(0);b.setMinimumHeight(0);b.setPadding(dp(5),0,dp(5),0);b.setBackground(round(Color.rgb(55,67,98),10));LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-2,dp(40));p.leftMargin=dp(5);b.setLayoutParams(p);return b;}
-              private GradientDrawable round(int c,int r){GradientDrawable d=new GradientDrawable();d.setColor(c);d.setCornerRadius(dp(r));return d;}
-              private void gap(LinearLayout l,int h){View v=new View(this);l.addView(v,new LinearLayout.LayoutParams(1,dp(h)));}
-              private int dp(int v){return (int)(v*getResources().getDisplayMetrics().density+.5f);}
-              private void toast(String s){Toast.makeText(this,s,Toast.LENGTH_LONG).show();}
+
+              private void clearAll() {
+                  new AlertDialog.Builder(this)
+                      .setTitle("Usunąć wszystkie dane?")
+                      .setMessage("Ta operacja usunie konta, kontekst, PIN i zaszyfrowane dane. Nie można jej cofnąć.")
+                      .setNegativeButton("Anuluj", null)
+                      .setPositiveButton("Usuń", (d, w) -> {
+                          getFilesDir();
+                          new File(getFilesDir(), DATA_FILE).delete();
+                          try {
+                              KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+                              ks.load(null);
+                              ks.deleteEntry(KEY_ALIAS);
+                          } catch (Exception ignored) {}
+                          securityPrefs.edit().clear().apply();
+                          toast("Dane usunięte.");
+                          finish();
+                      })
+                      .show();
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (unlocked) {
+                      new AlertDialog.Builder(this)
+                          .setMessage("Zamknąć Claude Manager?")
+                          .setNegativeButton("Zostań", null)
+                          .setPositiveButton("Zamknij", (d, w) -> finish())
+                          .show();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
           }
           EOF
 
-      - name: Build APK
-        run: gradle assembleDebug
+      - name: Zbuduj APK
+        run: gradle --no-daemon assembleDebug
 
-      - name: Upload APK
+      - name: Udostępnij APK
         uses: actions/upload-artifact@v4
         with:
-          name: Claude-Manager-by-Zdzisi0
+          name: Claude-Manager-by-Zdzisi0-v2
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
